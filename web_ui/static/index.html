@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recruitment Dashboard | WhatsApp Manager</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">🚀</span>
+                <span class="logo-text">RecruitFlow</span>
+            </div>
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" onclick="showTab('campaign')">New Campaign</a>
+                <a href="#" class="nav-item" onclick="showTab('history')">Daily Summary</a>
+                <a href="#" class="nav-item" onclick="checkConnection()">Validate API</a>
+            </nav>
+            <div class="status-indicator">
+                <div class="status-dot" id="api-status-dot"></div>
+                <span id="api-status-text">API Checking...</span>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Campaign Tab -->
+            <section id="campaign-tab" class="tab-content active">
+                <header class="section-header">
+                    <h1>Create New Campaign</h1>
+                    <p>Select target and enter job details</p>
+                </header>
+
+                <div class="grid-container">
+                    <!-- Config Form -->
+                    <div class="card campaign-form">
+                        <div class="form-group">
+                            <label for="category">Category (Brevo Folder)</label>
+                            <select id="category">
+                                <option value="">Loading categories...</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="experience">Experience Level</label>
+                            <select id="experience">
+                                <option value="all">All Levels</option>
+                                <option value="junior">Junior</option>
+                                <option value="mid">Mid</option>
+                                <option value="senior">Senior</option>
+                                <option value="executive">Executive</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="campaign_id">Campaign ID <span style="color: #da3633;">*</span> (Required)</label>
+                            <input type="text" id="campaign_id" placeholder="e.g. MARKETING-JUN-FEB">
+                        </div>
+                        <hr>
+                        <div class="form-group">
+                            <label for="job_title">Job Title</label>
+                            <input type="text" id="job_title" placeholder="e.g. Senior Backend Engineer">
+                        </div>
+                        <div class="form-group">
+                            <label for="company">Company Name</label>
+                            <input type="text" id="company" placeholder="e.g. Tech Solutions Ltd">
+                        </div>
+                        <div class="form-group">
+                            <label for="location">Location</label>
+                            <input type="text" id="location" placeholder="e.g. Remote / Dubai">
+                        </div>
+                        <div class="form-group">
+                            <label for="apply_link">Application Link</label>
+                            <input type="text" id="apply_link" placeholder="https://...">
+                        </div>
+                        
+                        <div class="button-group">
+                            <button class="btn btn-secondary" onclick="runDryRun()">Dry Run (Preview)</button>
+                            <button class="btn btn-primary" id="send-btn" onclick="runSend()">Send Messages</button>
+                        </div>
+                    </div>
+
+                    <!-- Log Output -->
+                    <div class="card log-container">
+                        <div class="log-header">
+                            <span>System Logs</span>
+                            <button class="btn-clear" onclick="clearLogs()">Clear</button>
+                        </div>
+                        <pre id="log-output">System ready. Click Validate API to start.</pre>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Summary Tab -->
+            <section id="history-tab" class="tab-content">
+                <header class="section-header">
+                    <h1>Daily Summary</h1>
+                    <p>Performance stats for the last 24 hours</p>
+                </header>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>Success</h3>
+                        <div class="stat-value" id="stat-success">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Failed</h3>
+                        <div class="stat-value" id="stat-failed">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Total Sent</h3>
+                        <div class="stat-value" id="stat-total">0</div>
+                    </div>
+                    <div class="stat-card highlight">
+                        <h3>Daily Limit</h3>
+                        <div class="stat-value" id="stat-limit">100</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div id="confirm-modal" class="modal">
+        <div class="modal-content">
+            <h2>🚨 Confirm Live Campaign?</h2>
+            <p>You are about to send WhatsApp messages to real candidates. This action cannot be undone.</p>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-danger" onclick="confirmAndSend()">Confirm & Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

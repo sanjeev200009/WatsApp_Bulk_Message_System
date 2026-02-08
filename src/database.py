@@ -53,20 +53,27 @@ class BrevoClient:
             logger.error(f"Brevo connection error: {e}")
             return False
 
-    def get_eligible_recipients(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_eligible_recipients(self, limit: int = 50, list_id: int = None, 
+                               campaign_key: str = None, experience_level: str = None) -> List[Dict[str, Any]]:
         """
-        Fetch contacts from Brevo that haven't been sent this template before.
-        Includes proper SUBSCRIBED consent filtering and pagination.
+        Fetch contacts from Brevo that haven't been sent this campaign before.
+        Supports list-based targeting for job campaigns.
         
         Args:
             limit: Maximum number of eligible recipients to return
+            list_id: Brevo list ID to filter contacts (for experience-level targeting)
+            campaign_key: Unique campaign identifier (e.g., "2026-02-07-job-003:template_senior")
+            experience_level: Experience level label (e.g., "junior", "mid", "senior")
             
         Returns:
             List of dictionaries containing user details normalized to our app structure:
-            {'id': str, 'phone': str, 'last_sent_at': None}
+            {'id': str, 'phone': str, 'experience_level': str, 'list_id': int, 'last_sent_at': None}
         """
         url = f"{self.base_url}/contacts"
-        template_name = settings.TEMPLATE_NAME
+        
+        # Use campaign_key for deduplication, fallback to template_name for backwards compatibility
+        dedup_key = campaign_key if campaign_key else settings.TEMPLATE_NAME
+        
         normalized_contacts = []
         offset = 0
         page_limit = 100  # Brevo's max per page
@@ -81,9 +88,10 @@ class BrevoClient:
                 "sort": "desc"
             }
             
-            # Add list filtering if specified
-            if settings.BREVO_LIST_ID:
-                params["listId"] = settings.BREVO_LIST_ID
+            # Prioritize list_id parameter (for job campaigns), fallback to global BREVO_LIST_ID
+            target_list_id = list_id if list_id is not None else settings.BREVO_LIST_ID
+            if target_list_id:
+                params["listIds"] = [target_list_id]
 
             try:
                 response = requests.get(url, headers=self.headers, params=params, timeout=30)
@@ -103,18 +111,11 @@ class BrevoClient:
                     contact_id = contact.get('id')
                     attributes = contact.get('attributes', {})
                     
-                    # CRITICAL: Check SUBSCRIBED status first
-                    # Brevo tracks subscription status per list
-                    if settings.BREVO_LIST_ID:
-                        # If filtering by specific list, contact must be subscribed to that list
+                    # CRITICAL: Check list membership (consent gate for this project)
+                    if target_list_id:
                         list_ids = contact.get('listIds', [])
-                        if settings.BREVO_LIST_ID not in list_ids:
-                            logger.debug(f"Skipping contact {contact_id}: Not subscribed to list {settings.BREVO_LIST_ID}")
-                            continue
-                    else:
-                        # If no specific list, check general email subscription status
-                        if contact.get('emailBlacklisted', True):  # Default to True for safety
-                            logger.debug(f"Skipping contact {contact_id}: Email not subscribed")
+                        if target_list_id not in list_ids:
+                            logger.debug(f"Skipping contact {contact_id}: Not in target list {target_list_id}")
                             continue
                     
                     # Check Opt-Out and Blacklisting
@@ -133,8 +134,8 @@ class BrevoClient:
                     phone = attributes.get(settings.BREVO_PHONE_ATTRIBUTE)
                     
                     if not phone:
-                        # Try to fall back to 'mobile' field if standard attribute fails
-                        phone = contact.get('mobile') or contact.get('sms')
+                        # Try fallback fields
+                        phone = attributes.get('WHATSAPP') or contact.get('mobile') or contact.get('sms')
                     
                     if not phone:
                         logger.debug(f"Skipping contact {contact_id}: No phone number found in {settings.BREVO_PHONE_ATTRIBUTE}")
@@ -147,14 +148,16 @@ class BrevoClient:
                         logger.debug(f"Skipping contact {contact_id}: Invalid phone {phone} - {e}")
                         continue
                     
-                    # Skip if already sent this template successfully
-                    if self.was_sent_before(clean_phone, template_name):
-                        logger.debug(f"Skipping contact {contact_id}: Already sent template '{template_name}'")
+                    # Skip if already sent this campaign successfully
+                    if self.was_sent_before(clean_phone, dedup_key):
+                        logger.debug(f"Skipping contact {contact_id}: Already sent campaign '{dedup_key}'")
                         continue
 
                     normalized_contacts.append({
                         'id': str(contact_id),
                         'phone': clean_phone,
+                        'experience_level': experience_level,
+                        'list_id': target_list_id,
                         'last_sent_at': None
                     })
                     
@@ -178,13 +181,115 @@ class BrevoClient:
         logger.info(f"Found {len(normalized_contacts)} eligible recipients after checking {pages_fetched} pages")
         return normalized_contacts[:limit]  # Ensure we don't exceed requested limit
 
-    def update_last_sent(self, user_id: str):
+    def get_all_folders(self) -> List[Dict[str, Any]]:
         """
-        No-op for Brevo unless we want to update a custom attribute.
-        Currently we rely on local logs for 'sent today' checks.
+        Fetch all contact folders from Brevo.
         """
-        pass
-        
+        folders = []
+        offset = 0
+        limit = 50
+        try:
+            while True:
+                url = f"{self.base_url}/contacts/folders?limit={limit}&offset={offset}"
+                response = requests.get(url, headers=self.headers, timeout=10)
+                response.raise_for_status()
+                batch = response.json().get('folders', [])
+                
+                # Fetch list count for each folder
+                for folder in batch:
+                    folder_id = folder['id']
+                    # Use a lightweight check or the lists endpoint
+                    list_url = f"{self.base_url}/contacts/folders/{folder_id}/lists?limit=1"
+                    try:
+                        list_res = requests.get(list_url, headers=self.headers, timeout=5)
+                        folder['list_count'] = list_res.json().get('count', 0)
+                    except:
+                        folder['list_count'] = 0
+
+                folders.extend(batch)
+                if len(batch) < limit:
+                    break
+                offset += limit
+            return folders
+        except Exception as e:
+            logger.error(f"Error fetching folders from Brevo: {e}")
+            return []
+
+    def get_lists_by_folder_name(self, folder_identifier: str) -> Dict[str, int]:
+        """
+        Find a folder by name or ID and return its list mapping.
+        """
+        try:
+            # 1. Get all folders using pagination
+            folders = []
+            offset = 0
+            limit = 50
+            while True:
+                folders_url = f"{self.base_url}/contacts/folders?limit={limit}&offset={offset}"
+                response = requests.get(folders_url, headers=self.headers, timeout=10)
+                response.raise_for_status()
+                batch = response.json().get('folders', [])
+                folders.extend(batch)
+                if len(batch) < limit:
+                    break
+                offset += limit
+            
+            # 2. Find target folder (by ID or Name)
+            target_folder = None
+            
+            # Check if identifier is string and numeric (Folder ID)
+            if isinstance(folder_identifier, str) and folder_identifier.isdigit():
+                target_id = int(folder_identifier)
+                target_folder = next((f for f in folders if f['id'] == target_id), None)
+            
+            # Fallback/alternative: Check by Name
+            if not target_folder:
+                target_folder = next((f for f in folders if f['name'].upper() == folder_identifier.upper()), None)
+            
+            if not target_folder:
+                logger.error(f"Folder identifier '{folder_identifier}' not found in Brevo.")
+                return {}
+            
+            # 3. Get all lists DIRECTLY from this folder ID (more reliable and handles many lists)
+            folder_id = target_folder['id']
+            folder_lists = []
+            offset = 0
+            limit = 50
+            try:
+                while True:
+                    lists_url = f"{self.base_url}/contacts/folders/{folder_id}/lists?limit={limit}&offset={offset}"
+                    response = requests.get(lists_url, headers=self.headers, timeout=10)
+                    response.raise_for_status()
+                    batch = response.json().get('lists', [])
+                    folder_lists.extend(batch)
+                    if len(batch) < limit:
+                        break
+                    offset += limit
+            except Exception as list_err:
+                logger.warning(f"Direct folder list fetch failed, falling back to account-wide search: {list_err}")
+                # Fallback: fetch all and filter (legacy behavior)
+                all_lists = []
+                offset = 0
+                while True:
+                    url = f"{self.base_url}/contacts/lists?limit={limit}&offset={offset}"
+                    res = requests.get(url, headers=self.headers, timeout=15)
+                    res.raise_for_status()
+                    batch = res.json().get('lists', [])
+                    all_lists.extend(batch)
+                    if len(batch) < limit: break
+                    offset += limit
+                folder_lists = [l for l in all_lists if l.get('folderId') == folder_id]
+            
+            # 4. Return all lists belonging to this folder with their original names
+            mapping = {l['name']: l['id'] for l in folder_lists}
+            
+            logger.info(f"Found {len(mapping)} lists in category '{target_folder['name']}' (ID: {folder_id})")
+            return mapping
+            
+        except Exception as e:
+            logger.error(f"Error fetching hierarchy from Brevo: {e}")
+            return {}
+
     def create_tables_if_dev(self):
         """Create SQLite tables for send history tracking."""
         if not self.conn:
@@ -192,24 +297,26 @@ class BrevoClient:
             return
             
         try:
-            # Create send_history table
+            # Create send_history table with campaign_key for job campaigns
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS send_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     phone TEXT NOT NULL,
-                    template_name TEXT NOT NULL,
+                    campaign_key TEXT NOT NULL,
+                    experience_level TEXT,
+                    list_id INTEGER,
                     sent_at DATETIME NOT NULL,
-                    status TEXT NOT NULL, -- 'success' or 'failed'
+                    status TEXT NOT NULL,
                     wamid TEXT,
                     error TEXT,
-                    UNIQUE(phone, template_name, status) ON CONFLICT REPLACE
+                    UNIQUE(phone, campaign_key) ON CONFLICT REPLACE
                 )
             ''')
             
             # Create index for fast lookups
             self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_phone_template 
-                ON send_history(phone, template_name, status)
+                CREATE INDEX IF NOT EXISTS idx_phone_campaign 
+                ON send_history(phone, campaign_key, status)
             ''')
             
             self.conn.commit()
@@ -218,17 +325,17 @@ class BrevoClient:
         except Exception as e:
             logger.error(f"Failed to create SQLite tables: {e}")
     
-    def was_sent_before(self, phone: str, template_name: str) -> bool:
-        """Check if phone was already successfully sent this template."""
+    def was_sent_before(self, phone: str, campaign_key: str) -> bool:
+        """Check if phone was already successfully sent this campaign."""
         if not self.cursor:
             return False
             
         try:
             self.cursor.execute('''
                 SELECT 1 FROM send_history 
-                WHERE phone = ? AND template_name = ? AND status = 'success'
+                WHERE phone = ? AND campaign_key = ? AND status = 'success'
                 LIMIT 1
-            ''', (phone, template_name))
+            ''', (phone, campaign_key))
             
             return self.cursor.fetchone() is not None
             
@@ -236,8 +343,10 @@ class BrevoClient:
             logger.error(f"Error checking send history: {e}")
             return False
     
-    def record_send(self, phone: str, template_name: str, status: str, wamid: str = None, error: str = None):
-        """Record send attempt in persistent history."""
+    def record_send(self, phone: str, campaign_key: str, status: str, 
+                   experience_level: str = None, list_id: int = None,
+                   wamid: str = None, error: str = None):
+        """Record send attempt in persistent history with campaign tracking."""
         if not self.cursor:
             logger.warning("SQLite not available. Cannot record send.")
             return
@@ -245,12 +354,12 @@ class BrevoClient:
         try:
             self.cursor.execute('''
                 INSERT OR REPLACE INTO send_history 
-                (phone, template_name, sent_at, status, wamid, error)
-                VALUES (?, ?, datetime('now'), ?, ?, ?)
-            ''', (phone, template_name, status, wamid, error))
+                (phone, campaign_key, experience_level, list_id, sent_at, status, wamid, error)
+                VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?)
+            ''', (phone, campaign_key, experience_level, list_id, status, wamid, error))
             
             self.conn.commit()
-            logger.debug(f"Recorded {status} send to {phone} for template {template_name}")
+            logger.debug(f"Recorded {status} send to {phone} for campaign {campaign_key}")
             
         except Exception as e:
             logger.error(f"Failed to record send: {e}")

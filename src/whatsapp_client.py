@@ -20,7 +20,8 @@ class WhatsAppClient:
                               to_phone: str, 
                               template_name: str = None, 
                               language_code: str = None,
-                              image_url: str = None) -> tuple[Dict[str, Any], int]:
+                              image_url: str = None,
+                              body_variables: Dict[str, str] = None) -> tuple[Dict[str, Any], int]:
         """
         Send a template message to a specific phone number.
         
@@ -29,6 +30,7 @@ class WhatsAppClient:
             template_name: Name of the template (defaults to config)
             language_code: Language of the template (defaults to config)
             image_url: URL for the image header (defaults to config)
+            body_variables: Dict of variables for template body (e.g., {'job_title': '...', 'company': '...', 'location': '...', 'apply_link': '...'})
             
         Returns:
             Tuple of (API response dictionary, HTTP status code)
@@ -38,6 +40,39 @@ class WhatsAppClient:
         image_url = image_url or str(settings.IMAGE_URL)
 
         url = f"{self.base_url}/{settings.PHONE_NUMBER_ID}/messages"
+        
+        # Build components
+        components = [
+            {
+                "type": "header",
+                "parameters": [
+                    {
+                        "type": "image",
+                        "image": {
+                            "link": image_url
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        # Add body variables if provided
+        if body_variables:
+            body_params = []
+            # WhatsApp requires variables in order: typically job_title, company, location, apply_link
+            # The order must match the template definition
+            for key in ['job_title', 'company', 'location', 'apply_link', 'category', 'experience']:
+                if key in body_variables:
+                    body_params.append({
+                        "type": "text",
+                        "text": str(body_variables[key])
+                    })
+            
+            if body_params:
+                components.append({
+                    "type": "body",
+                    "parameters": body_params
+                })
         
         payload = {
             "messaging_product": "whatsapp",
@@ -49,19 +84,7 @@ class WhatsAppClient:
                 "language": {
                     "code": language_code
                 },
-                "components": [
-                    {
-                        "type": "header",
-                        "parameters": [
-                            {
-                                "type": "image",
-                                "image": {
-                                    "link": image_url
-                                }
-                            }
-                        ]
-                    }
-                ]
+                "components": components
             }
         }
 
